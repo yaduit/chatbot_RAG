@@ -1,0 +1,30 @@
+# UI
+streamlit
+
+# LangChain core
+langchain
+langchain-community
+langchain-text-splitters
+
+
+# Gemini (Google LLM)
+langchain-google-genai
+google-generativeai
+
+# Vector database
+faiss-cpu
+numpy
+
+# Embeddings
+sentence-transformers
+
+# PDF loading
+pypdf
+pdfplumber
+
+# Text splitting & token handling
+tiktoken
+nltk
+
+# Environment variables
+python-dotenv

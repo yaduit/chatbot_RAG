@@ -83,3 +83,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+
+# Vector cache / 
+.vector_cache/

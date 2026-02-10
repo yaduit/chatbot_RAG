@@ -1,54 +1,131 @@
+"""
+app.py
+======
+Streamlit RAG application with intelligent FAISS caching.
+
+Architecture:
+-------------
+- UI Layer (this file): Handles Streamlit interface
+- Vector Store Layer (vector_store.py): Handles embeddings & caching
+- LLM Layer: Gemini API for answer generation
+
+Caching Strategy:
+-----------------
+1. @st.cache_resource: Cache embeddings model (loaded once)
+2. Disk persistence: FAISS indexes cached in vector_store.py
+3. Session state: Track current PDF to invalidate cache on change
+"""
+
 import streamlit as st
 from pypdf import PdfReader
 import pandas as pd
 import base64
-import os
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from datetime import datetime
 
-# Custom CSS for better UI
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Import our vector store module
+import vector_store
+
+
+# ============================================================================
+# STREAMLIT CACHING
+# ============================================================================
+
+@st.cache_resource
+def load_embeddings_model():
+    """
+    Load embeddings model ONCE and cache it.
+    
+    Uses @st.cache_resource because:
+    - HuggingFace model is a non-serializable resource
+    - Should be shared across all reruns
+    - Should persist in memory
+    
+    Returns:
+        HuggingFaceEmbeddings: Cached embeddings model
+    """
+    return vector_store.get_embeddings_model()
+
+
+# ============================================================================
+# PDF PROCESSING
+# ============================================================================
+
+def extract_pdf_text(pdf_file) -> str:
+    """
+    Extract text from uploaded PDF.
+    
+    Args:
+        pdf_file: Streamlit UploadedFile object
+        
+    Returns:
+        str: Extracted text
+    """
+    text = ""
+    try:
+        pdf_reader = PdfReader(pdf_file)
+        for page in pdf_reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
+    except Exception as e:
+        st.error(f"Error reading PDF: {str(e)}")
+    
+    return text
+
+
+# ============================================================================
+# LLM INTEGRATION
+# ============================================================================
+
+def get_answer_from_context(context: str, question: str, api_key: str) -> str:
+    """
+    Generate answer using Gemini API.
+    
+    Args:
+        context: Relevant text chunks from PDF
+        question: User's question
+        api_key: Google API key
+        
+    Returns:
+        str: Generated answer
+    """
+    prompt = f"""Answer the question based on the provided context. Be detailed and accurate.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:"""
+    
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.3,
+        google_api_key=api_key
+    )
+    
+    response = model.invoke(prompt)
+    return response.content
+
+
+# ============================================================================
+# UI STYLING
+# ============================================================================
+
 def load_css():
+    """Apply custom CSS styling."""
     st.markdown("""
     <style>
-        /* Main container styling */
-        .main {
-            background-color: #0e1117;
-        }
-        
-        /* Header styling */
-        .main-header {
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            padding: 2rem;
-            border-radius: 10px;
-            margin-bottom: 2rem;
-            text-align: center;
-        }
-        
-        .main-header h1 {
-            color: white;
-            margin: 0;
-            font-size: 2.5rem;
-        }
-        
-        .main-header p {
-            color: #f0f0f0;
-            margin-top: 0.5rem;
-            font-size: 1.1rem;
-        }
-        
-        /* Chat message styling */
+        /* Chat messages */
         .chat-message {
             padding: 1.5rem;
             border-radius: 10px;
             margin-bottom: 1rem;
             display: flex;
             animation: fadeIn 0.5s;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
         }
         
         @keyframes fadeIn {
@@ -77,71 +154,20 @@ def load_css():
             max-width: 60px;
             max-height: 60px;
             border-radius: 50%;
-            object-fit: cover;
             border: 3px solid white;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
         }
         
         .chat-message .message {
             width: 85%;
             padding: 0 1.5rem;
             color: #fff;
-            font-size: 1rem;
             line-height: 1.6;
         }
         
         .chat-message .info {
             font-size: 0.85rem;
             margin-top: 0.8rem;
-            color: #f0f0f0;
             opacity: 0.9;
-        }
-        
-        /* Sidebar styling */
-        .css-1d391kg {
-            background-color: #1e1e1e;
-        }
-        
-        /* Success/Warning/Info boxes */
-        .stAlert {
-            border-radius: 10px;
-        }
-        
-        /* Button styling */
-        .stButton>button {
-            border-radius: 8px;
-            font-weight: 600;
-            transition: all 0.3s;
-        }
-        
-        .stButton>button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-        }
-        
-        /* Download button styling */
-        .download-btn {
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 8px;
-            text-decoration: none;
-            display: inline-block;
-            font-weight: 600;
-            transition: all 0.3s;
-            border: none;
-            cursor: pointer;
-        }
-        
-        .download-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-        
-        /* File uploader styling */
-        .uploadedFile {
-            border-radius: 8px;
-            border: 2px solid #667eea;
         }
         
         /* Stats card */
@@ -163,338 +189,247 @@ def load_css():
             margin: 0.5rem 0 0 0;
             opacity: 0.9;
         }
-        
-        /* Question input container */
-        .question-container {
-            position: relative;
-            margin-bottom: 1rem;
-        }
-        
-        .question-icon {
-            font-size: 1.5rem;
-            margin-right: 0.5rem;
-            vertical-align: middle;
-        }
     </style>
     """, unsafe_allow_html=True)
 
-# Extract text from PDF documents
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        try:
-            pdf_reader = PdfReader(pdf)
-            for page in pdf_reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted
-        except Exception as e:
-            st.error(f"Error reading {pdf.name}: {str(e)}")
-    return text
 
-# Split text into chunks
-def get_text_chunks(text, model_name):
-    if model_name == "Google AI":
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, 
-            chunk_overlap=200
-        )
-    chunks = text_splitter.split_text(text)
-    return chunks
+# ============================================================================
+# MAIN APP
+# ============================================================================
 
-# Create vector store from text chunks
-def get_vector_store(text_chunks, model_name, api_key=None):
-    if model_name == "Google AI":
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",  # Correct embedding model
-            google_api_key=api_key
-        )
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss_index")
-    return vector_store
-
-# Get answer from documents using direct LLM call
-def get_answer_from_docs(docs, question, api_key):
-    """Get answer from documents using Google Gemini"""
-    # Combine document content
-    context = "\n\n".join([doc.page_content for doc in docs])
-    
-    # Create prompt
-    prompt = f"""Answer the question as detailed as possible from the provided context. Make sure to provide all the details with proper structure. If the answer is not in the provided context, just say "answer is not available in the context". Don't provide wrong answers.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer:"""
-    
-    # Get response from model using the correct model name
-    model = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",  # FIXED: Using correct model name from available models
-        temperature=0.3,
-        google_api_key=api_key
-    )
-    
-    response = model.invoke(prompt)
-    return response.content
-
-# Process user input and generate response
-def user_input(user_question, model_name, api_key, pdf_docs, conversation_history):
-    if api_key is None or not api_key.strip():
-        st.warning("⚠️ Please provide an API key")
-        return
-    
-    if pdf_docs is None or len(pdf_docs) == 0:
-        st.warning("⚠️ Please upload at least one PDF file")
-        return
-    
-    with st.spinner("🔍 Processing your question..."):
-        try:
-            # Get text and create vector store
-            raw_text = get_pdf_text(pdf_docs)
-            if not raw_text.strip():
-                st.error("❌ No text could be extracted from the PDF files")
-                return
-                
-            text_chunks = get_text_chunks(raw_text, model_name)
-            vector_store = get_vector_store(text_chunks, model_name, api_key)
-            
-            user_question_output = ""
-            response_output = ""
-            
-            if model_name == "Google AI":
-                embeddings = GoogleGenerativeAIEmbeddings(
-                    model="models/gemini-embedding-001",  # Correct embedding model
-                    google_api_key=api_key
-                )
-                new_db = FAISS.load_local(
-                    "faiss_index", 
-                    embeddings, 
-                    allow_dangerous_deserialization=True
-                )
-                
-                # Get relevant documents
-                docs = new_db.similarity_search(user_question, k=4)
-                
-                # Get answer using direct LLM call
-                response_output = get_answer_from_docs(docs, user_question, api_key)
-                user_question_output = user_question
-                
-                pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
-                conversation_history.append((
-                    user_question_output, 
-                    response_output, 
-                    model_name, 
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    ", ".join(pdf_names)
-                ))
-
-                # Display chat messages with improved UI
-                st.markdown(
-                    f"""
-                    <div class="chat-message user">
-                        <div class="avatar">
-                            <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
-                        </div>    
-                        <div class="message">
-                            <strong>You:</strong><br>{user_question_output}
-                            <div class="info">📅 {datetime.now().strftime('%H:%M:%S')}</div>
-                        </div>
-                    </div>
-                    <div class="chat-message bot">
-                        <div class="avatar">
-                            <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp">
-                        </div>
-                        <div class="message">
-                            <strong>Assistant:</strong><br>{response_output}
-                            <div class="info">🤖 Powered by Gemini 2.5 Flash | 📄 Sources: {len(pdf_names)} PDF(s)</div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-            
-            # Show download option if conversation exists
-            if len(st.session_state.conversation_history) > 0:
-                df = pd.DataFrame(
-                    st.session_state.conversation_history, 
-                    columns=["Question", "Answer", "Model", "Timestamp", "PDF Name"]
-                )
-                csv = df.to_csv(index=False)
-                b64 = base64.b64encode(csv.encode()).decode()
-                href = f'<a href="data:file/csv;base64,{b64}" download="conversation_history.csv" class="download-btn">📥 Download Conversation History</a>'
-                st.sidebar.markdown(href, unsafe_allow_html=True)
-                
-                # Show stats
-                st.sidebar.markdown(f"""
-                    <div class="stats-card">
-                        <h3>{len(st.session_state.conversation_history)}</h3>
-                        <p>Total Questions Asked</p>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            st.success("✅ Response generated successfully!")
-            
-        except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.error("Please check your API key and try again.")
-
-# Main application entry point
 def main():
+    # Page config
     st.set_page_config(
-        page_title="Chat with PDFs", 
-        page_icon="📚",
-        layout="wide",
-        initial_sidebar_state="expanded"
+        page_title="Chat with PDF",
+        page_icon="📄",
+        layout="wide"
     )
     
-    # Load custom CSS
+    # Load CSS
     load_css()
     
     # Header
-    st.markdown("""
-        <div class="main-header">
-            <h1>📚 Chat with Multiple PDFs</h1>
-            <p>Upload your documents and ask questions powered by AI</p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.title("Chat with PDF")
     
     # Initialize session state
     if 'conversation_history' not in st.session_state:
         st.session_state.conversation_history = []
     
-    # Sidebar configuration
+    if 'current_pdf_name' not in st.session_state:
+        st.session_state.current_pdf_name = None
+    
+    if 'vector_store' not in st.session_state:
+        st.session_state.vector_store = None
+    
+    # Load embeddings model (cached)
+    embeddings_model = load_embeddings_model()
+    
+    # Sidebar
     with st.sidebar:
         st.title("⚙️ Configuration")
         
-        # Model selection
-        model_name = st.radio(
-            "Select AI Model:", 
-            ("Google AI",),
-            help="Choose the AI model for processing"
+        # API Key
+        api_key = st.text_input(
+            "🔑 Google API Key:",
+            type="password",
+            help="Required for answer generation (Gemini)"
         )
-        
-        # API Key input with password type
-        api_key = None
-        if model_name == "Google AI":
-            api_key = st.text_input(
-                "🔑 Enter your Google API Key:",
-                type="password",
-                help="Your API key is required to use the service",
-                placeholder="Enter your API key here"
-            )
-            st.markdown("🔗 [Get your API key here](https://ai.google.dev/)")
-            
-            if not api_key:
-                st.info("👆 Please enter your Google API Key above to get started.")
+        st.markdown("[Get API Key](https://ai.google.dev/)")
         
         st.markdown("---")
-        st.title("📁 Document Upload")
+        st.title("📁 Upload PDF")
         
-        # PDF uploader
-        pdf_docs = st.file_uploader(
-            "Upload PDF Files",
-            accept_multiple_files=True,
+        # PDF Upload
+        pdf_file = st.file_uploader(
+            "Upload your PDF",
             type=['pdf'],
-            help="Select one or more PDF files to analyze"
+            help="Max 200MB, single PDF at a time"
         )
         
-        if pdf_docs:
-            st.success(f"✅ {len(pdf_docs)} file(s) uploaded")
-            for pdf in pdf_docs:
-                st.text(f"📄 {pdf.name}")
-        
-        # Process button
-        if st.button("🚀 Submit & Process", use_container_width=True):
-            if pdf_docs and api_key:
-                with st.spinner("Processing PDFs..."):
-                    st.success("✅ PDFs processed successfully!")
-            elif not pdf_docs:
-                st.warning("⚠️ Please upload PDF files before processing.")
-            elif not api_key:
-                st.warning("⚠️ Please enter your API key before processing.")
+        # Process PDF button
+        if pdf_file:
+            st.success(f"✅ {pdf_file.name}")
+            st.text(f"Size: {pdf_file.size / (1024*1024):.2f} MB")
+            
+            # Check if this is a NEW pdf (different from current)
+            pdf_changed = st.session_state.current_pdf_name != pdf_file.name
+            
+            if st.button("🚀 Process PDF", use_container_width=True):
+                with st.spinner("Processing PDF..."):
+                    # Extract text
+                    raw_text = extract_pdf_text(pdf_file)
+                    
+                    if not raw_text.strip():
+                        st.error("❌ No text found in PDF")
+                        return
+                    
+                    # Get or create vector store (with intelligent caching)
+                    st.session_state.vector_store = vector_store.get_or_create_vector_store(
+                        pdf_file,
+                        raw_text,
+                        embeddings_model
+                    )
+                    
+                    st.session_state.current_pdf_name = pdf_file.name
+                    
+                    # Clear old conversations when new PDF uploaded
+                    if pdf_changed:
+                        st.session_state.conversation_history = []
+                    
+                    st.success("✅ PDF processed successfully!")
+                    st.rerun()
         
         st.markdown("---")
         st.title("🔧 Actions")
         
-        # Action buttons
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("🔄 Clear Last", use_container_width=True):
-                if len(st.session_state.conversation_history) > 0:
-                    st.session_state.conversation_history.pop()
-                    st.success("✅ Last question cleared")
-                    st.rerun()
-                else:
-                    st.warning("⚠️ No conversation to clear")
+            if st.button("🔄 Clear Chat", use_container_width=True):
+                st.session_state.conversation_history = []
+                st.success("✅ Chat cleared")
+                st.rerun()
         
         with col2:
-            if st.button("🗑️ Reset All", use_container_width=True):
-                st.session_state.conversation_history = []
-                st.success("✅ All conversations cleared")
+            if st.button("🗑️ Clear Cache", use_container_width=True):
+                vector_store.clear_cache()
+                st.session_state.vector_store = None
+                st.session_state.current_pdf_name = None
+                st.success("✅ Cache cleared")
                 st.rerun()
         
         st.markdown("---")
         
-        # Info section
-        with st.expander("ℹ️ How to use"):
-            st.markdown("""
-            1. **Enter API Key**: Get your free API key from Google AI
-            2. **Upload PDFs**: Select one or more PDF documents
-            3. **Process**: Click 'Submit & Process' button
-            4. **Ask Questions**: Type your question in the input box
-            5. **Download**: Export conversation history as CSV
+        # Stats
+        if len(st.session_state.conversation_history) > 0:
+            st.markdown(f"""
+                <div class="stats-card">
+                    <h3>{len(st.session_state.conversation_history)}</h3>
+                    <p>Questions Asked</p>
+                </div>
+            """, unsafe_allow_html=True)
             
-            **Models Used**: 
-            - Chat Model: `gemini-2.5-flash`
-            - Embedding: `gemini-embedding-001`
-            """)
+            # Download conversation
+            df = pd.DataFrame(
+                st.session_state.conversation_history,
+                columns=["Question", "Answer", "Timestamp", "PDF"]
+            )
+            csv = df.to_csv(index=False)
+            b64 = base64.b64encode(csv.encode()).decode()
+            st.markdown(
+                f'<a href="data:file/csv;base64,{b64}" download="conversation.csv" '
+                f'style="text-decoration:none;"><button style="width:100%;padding:0.5rem;'
+                f'background:#667eea;color:white;border:none;border-radius:8px;'
+                f'cursor:pointer;">📥 Download Chat</button></a>',
+                unsafe_allow_html=True
+            )
         
-        # Additional info about API key
-        with st.expander("🔑 About API Keys"):
+        # Info
+        with st.expander("ℹ️ How It Works"):
             st.markdown("""
-            **Getting your Google AI API Key:**
-            1. Visit [Google AI Studio](https://ai.google.dev/)
-            2. Sign in with your Google account
-            3. Click on "Get API Key"
-            4. Create a new API key or use existing one
-            5. Copy and paste it in the field above
+            **Caching Strategy:**
+            1. Upload PDF → Extract text
+            2. Generate embeddings (ONCE)
+            3. Save FAISS index to disk
+            4. Future queries reuse cached embeddings
             
-            **Your API key is encrypted** (password field) for security.
+            **No Regeneration:**
+            - Same PDF = Load from cache
+            - New PDF = Generate & cache
+            - No API rate limits on embeddings
+            
+            **Models:**
+            - Embeddings: `all-MiniLM-L6-v2` (local)
+            - Chat: `gemini-2.5-flash` (API)
             """)
     
-    # Main chat interface with icon
+    # Main area
     st.markdown("### 🔍 Ask Your Question")
+    
+    # Question input
     user_question = st.text_input(
-        "Type your question here:",
-        placeholder="What would you like to know about your PDFs?",
-        key="question_input",
+        "Type your question:",
+        placeholder="What would you like to know?",
         label_visibility="collapsed"
     )
     
+    # Handle question
     if user_question and user_question.strip():
-        user_input(
-            user_question, 
-            model_name, 
-            api_key, 
-            pdf_docs, 
-            st.session_state.conversation_history
-        )
+        # Validation
+        if not api_key:
+            st.warning("⚠️ Please enter your Google API key")
+            return
+        
+        if st.session_state.vector_store is None:
+            st.warning("⚠️ Please upload and process a PDF first")
+            return
+        
+        with st.spinner("🤔 Thinking..."):
+            try:
+                # Search in vector store (NO regeneration, uses cached embeddings)
+                relevant_docs = vector_store.similarity_search(
+                    st.session_state.vector_store,
+                    user_question,
+                    k=4
+                )
+                
+                # Combine context
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                
+                # Get answer from Gemini
+                answer = get_answer_from_context(context, user_question, api_key)
+                
+                # Save to history
+                st.session_state.conversation_history.append((
+                    user_question,
+                    answer,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    st.session_state.current_pdf_name
+                ))
+                
+                # Display
+                st.markdown(f"""
+                <div class="chat-message user">
+                    <div class="avatar">
+                        <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
+                    </div>
+                    <div class="message">
+                        <strong>You:</strong><br>{user_question}
+                        <div class="info">📅 {datetime.now().strftime('%H:%M:%S')}</div>
+                    </div>
+                </div>
+                <div class="chat-message bot">
+                    <div class="avatar">
+                        <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp">
+                    </div>
+                    <div class="message">
+                        <strong>Assistant:</strong><br>{answer}
+                        <div class="info">🤖 Gemini 2.5 Flash | 📄 {st.session_state.current_pdf_name}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.success("✅ Answer generated!")
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
     
     # Display conversation history
     if len(st.session_state.conversation_history) > 0:
         st.markdown("---")
         st.subheader("💬 Conversation History")
         
-        # Display in reverse order (newest first)
-        for i, (question, answer, model, timestamp, pdfs) in enumerate(reversed(st.session_state.conversation_history)):
-            with st.expander(f"Q{len(st.session_state.conversation_history)-i}: {question[:50]}...", expanded=(i==0)):
+        for i, (question, answer, timestamp, pdf_name) in enumerate(
+            reversed(st.session_state.conversation_history)
+        ):
+            with st.expander(
+                f"Q{len(st.session_state.conversation_history)-i}: {question[:60]}...",
+                expanded=(i == 0)
+            ):
                 st.markdown(f"**Question:** {question}")
                 st.markdown(f"**Answer:** {answer}")
-                st.caption(f"🕐 {timestamp} | 🤖 {model} | 📄 {pdfs}")
+                st.caption(f"🕐 {timestamp} | 📄 {pdf_name}")
+
 
 if __name__ == "__main__":
     main()

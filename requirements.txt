@@ -1,31 +1,17 @@
-# UI
-streamlit
+streamlit>=1.31,<2.0
 
-# LangChain core
-langchain
-langchain-community
-langchain-text-splitters
-langchain-core
+pypdf>=4.0,<5.0
 
+langchain>=0.1.16,<0.3
+langchain-community>=0.0.30
+langchain-text-splitters>=0.0.1
 
-# Gemini (Google LLM)
-langchain-google-genai
-google-generativeai
+langchain-google-genai>=1.0.3
 
-# Vector database
-faiss-cpu
-numpy
+faiss-cpu>=1.7.4
 
-# Embeddings
-sentence-transformers
+sentence-transformers>=2.2.2
+transformers>=4.36.0
+torch>=2.0.0
 
-# PDF loading
-pypdf
-pdfplumber
-
-# Text splitting & token handling
-tiktoken
-nltk
-
-# Environment variables
-python-dotenv
+numpy>=1.24,<2.0
